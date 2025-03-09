@@ -1,10 +1,9 @@
 const PDFDocument = require("pdfkit");
+const PdfLog = require("../models/PdfLog");
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
-const PdfLog = require("../models/PdfLog");
 const sharp = require("sharp");
-require("dotenv").config();
 exports.generatePDF = async (req, res) => {
   try {
     const { products, user } = req.body;
@@ -12,21 +11,30 @@ exports.generatePDF = async (req, res) => {
       return res.status(400).json({ error: "No products selected" });
     }
 
-    const pdfDir = path.join(__dirname, "../pdfs");
-    if (!fs.existsSync(pdfDir)) {
-      fs.mkdirSync(pdfDir, { recursive: true });
-    }
+    const doc = new PDFDocument({ margin: 50, size: "A4" });
+    let pdfBuffer = [];
 
-    const fileName = `Products-Catelog-${Date.now()}.pdf`;
-    const filePath = path.join(pdfDir, fileName);
+    doc.on("data", (chunk) => pdfBuffer.push(chunk));
+    doc.on("end", async () => {
+      const finalPDF = Buffer.concat(pdfBuffer);
 
-    const doc = new PDFDocument({
-      margin: 50,
-      size: "A4",
+      try {
+        const pdfEntry = new PdfLog({
+          user: user ? user.name : "Anonymous",
+          filePath: finalPDF,
+          timestamp: Date.now(),
+        });
+
+        const savedPDF = await pdfEntry.save();
+        res.json({
+          fileId: savedPDF._id,
+          message: "PDF stored successfully in database",
+        });
+      } catch (error) {
+        console.error("Error logging PDF creation:", error);
+        res.status(500).json({ error: "Error storing PDF in database" });
+      }
     });
-
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
 
     const logoPath = path.join(__dirname, "../public/images/logo.png");
     if (fs.existsSync(logoPath)) {
@@ -42,24 +50,20 @@ exports.generatePDF = async (req, res) => {
     doc.moveDown(3);
 
     for (const [index, product] of products.entries()) {
-      if (index > 0) {
-        doc.addPage();
-      }
-
+      if (index > 0) doc.addPage();
       let yPos = 120;
 
       if (product.product_image) {
         try {
           const imagePath = path.join(
             __dirname,
-            `../public${product.product_image}`
+            `../public/${product.product_image}`
           );
           if (fs.existsSync(imagePath)) {
             doc.image(imagePath, 50, yPos, { width: 250 });
           } else if (product.product_image) {
             const response = await axios.get(
               `${process.env.APP_URL}/${product.product_image}`,
-
               {
                 responseType: "arraybuffer",
               }
@@ -72,7 +76,6 @@ exports.generatePDF = async (req, res) => {
           console.error("Error adding image:", error);
         }
       }
-
       doc.fontSize(18).text(product.product_name, 320, yPos, { width: 200 });
       doc
         .moveTo(320, yPos + 25)
@@ -81,7 +84,6 @@ exports.generatePDF = async (req, res) => {
         .lineWidth(3)
         .stroke();
       doc.strokeColor("black").lineWidth(1);
-
       yPos += 50;
 
       const specs = [
@@ -89,74 +91,44 @@ exports.generatePDF = async (req, res) => {
           label: "Size",
           value: product.size || `${product.length} x ${product.width} mm`,
         },
-        {
-          label: "Finish Type",
-          value: product.finish_type,
-        },
+        { label: "Finish Type", value: product.finish_type },
         { label: "Thickness", value: product.thickness || "-" },
       ];
 
-      specs.forEach((spec, i) => {
-        doc
-          .fontSize(12)
-          .font("Helvetica-Bold")
-          .text(spec.label, 320, yPos, { continued: false });
-        doc.moveDown(0.2);
-
+      specs.forEach((spec) => {
+        doc.fontSize(12).font("Helvetica-Bold").text(spec.label, 320, yPos);
         doc
           .moveTo(320, yPos + 15)
           .lineTo(380, yPos + 15)
           .stroke();
-
         doc.font("Helvetica").text(spec.value, 320, yPos + 25);
-
         yPos += 50;
       });
-
-      // if (product.product_image) {
-      //   try {
-      //     const thumbnailPath = product.thumbnail_url || product.product_image;
-      //     const imagePath = path.join(__dirname, `../public${thumbnailPath}`);
-      //     if (fs.existsSync(imagePath)) {
-      //       doc.image(imagePath, 320, yPos, { width: 100 });
-      //     } else if (thumbnailPath.startsWith("http")) {
-      //       const response = await axios.get(thumbnailPath, {
-      //         responseType: "arraybuffer",
-      //       });
-      //       const imageBuffer = Buffer.from(response.data);
-      //       doc.image(imageBuffer, 320, yPos, { width: 100 });
-      //     }
-      //   } catch (error) {
-      //     console.error("Error adding thumbnail:", error);
-      //   }
-      // }
-    }
-
-    try {
-      await PdfLog.create({
-        user: user ? user.name : null,
-        filePath: filePath,
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error("Error logging PDF creation:", error);
     }
 
     doc.end();
-
-    stream.on("finish", () => {
-      res.json({
-        filePath: `/pdfs/${fileName}`,
-        message: "PDF generated successfully",
-      });
-    });
-
-    stream.on("error", (err) => {
-      console.error("Stream error:", err);
-      res.status(500).json({ error: "Error saving PDF" });
-    });
   } catch (error) {
     console.error("PDF Generation Error:", error);
     res.status(500).json({ error: "Error generating PDF" });
+  }
+};
+
+exports.dowloadPdf = async (req, res) => {
+  try {
+    const pdfEntry = await PdfLog.findById(req.params.id);
+    if (!pdfEntry) {
+      return res.status(404).json({ error: "PDF not found" });
+    }
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Products-Catalog.pdf"`
+    );
+    res.status(200).send(pdfEntry.filePath);
+  } catch (error) {
+    console.error("Error fetching PDF:", error);
+    res.status(500).json({ error: "Error fetching PDF" });
   }
 };
