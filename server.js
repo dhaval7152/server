@@ -11,7 +11,20 @@ app.use(express.json());
 connectDB();
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/pdf", require("./routes/pdfRoutes"));
-app.use("/pdfs", express.static(path.join(__dirname, "pdfs")));
+// app.use("/pdfs", express.static(path.join(__dirname, "pdfs")));
+app.use(
+  "/pdfs",
+  express.static(path.join(__dirname, "pdfs"), {
+    setHeaders: (res, filePath) => {
+      if (path.extname(filePath) === ".pdf") {
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${path.basename(filePath)}"`
+        );
+      }
+    },
+  })
+);
 app.use("/api/products", require("./routes/productRoutes"));
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
